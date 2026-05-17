@@ -57,20 +57,22 @@ Primary（主节点）
 src/main/java/com/wangan/
 ├── Constant.java        # 全局常量：f、总节点数、共识阈值 QUORUM
 ├── Message.java         # 消息模型：类型、viewNumber、seqNumber、digest、senderId
-├── NetwokContext.java   # 网络上下文：节点列表、广播方法
-├── Node.java            # 节点核心：消息队列、三阶段处理逻辑、提交状态
-└── PBFTdemo.java        # 入口：case1 正常共识、case2 主节点作恶
+├── NetworkContext.java  # 网络上下文：节点列表、广播方法
+├── Node.java            # 节点核心：消息队列、三阶段处理逻辑、View Change 状态机、超时定时器
+└── PBFTdemo.java        # 入口：case1 正常共识、case2 主节点作恶、case3 主节点宕机
 ```
 
 #### 关键设计
 
-**消息去重**：`msgCountMap` 使用 `ConcurrentHashMap<String, Set<Integer>>`，以 senderId 为 key 去重，防止同一节点重复计票。
+**消息去重与计数**：`msgCountMap` 使用 `ConcurrentHashMap<String, Set<Integer>>`，以 senderId 去重，防止同一节点重复计票。
 
 **自票处理**：节点广播 PREPARE/COMMIT 后，本地直接将自己的 id 加入计数集合，广播不回传给自己，符合 PBFT 论文标准定义。
 
-**并发安全**：消息队列使用 `LinkedBlockingQueue`，计数和广播状态使用 `ConcurrentHashMap`，节点线程与接收线程安全隔离。
+**并发安全**：消息队列使用 `LinkedBlockingQueue`，计数和状态使用 `ConcurrentHashMap`/`ConcurrentSkipListSet`，节点线程与接收线程安全隔离。
 
-**幂等保护**：`msgBroadMap` 使用 `putIfAbsent` 初始化，防止晚到消息覆盖已有广播状态，避免重复广播。
+**幂等保护**：`commitBroadcasted` 与 `committedKeys` 使用 `ConcurrentHashMap.newKeySet()`，确保 COMMIT 只广播一次、本地提交只执行一次；`newViewBroadcasted` 确保同一 view 的 NEW_VIEW 只广播一次。
+
+**View Change**：每个节点维护独立的 `ScheduledExecutorService` 定时器，超时未收到合法 PRE_PREPARE 则自动递增 view 并广播 VIEW_CHANGE；新主节点收集到 2f+1 个 VIEW_CHANGE 后广播 NEW_VIEW，完成视图切换。
 
 ------
 
@@ -92,6 +94,20 @@ src/main/java/com/wangan/
 预期输出：
 [case2-提刀上洛] 未能达成共识，仅 0 个节点提交，未达到阈值 3
 [case2-跑路]    未能达成共识，仅 0 个节点提交，未达到阈值 3
+```
+
+#### case3：主节点宕机后 View Change
+
+不发送任何 PRE-PREPARE，模拟主节点宕机。副本节点在 5 秒超时后自动广播 VIEW_CHANGE，收集到 QUORUM 后选举新主节点，新视图下继续共识。
+
+```
+预期输出：
+case3 向当前主节点1发送请求，view=1
+[case3] 共识达成，4 个节点完成本地提交
+[case3-after-viewchange] 节点0 viewNumber=1 primary=false
+[case3-after-viewchange] 节点1 viewNumber=1 primary=true
+[case3-after-viewchange] 节点2 viewNumber=1 primary=false
+[case3-after-viewchange] 节点3 viewNumber=1 primary=false
 ```
 
 ------
@@ -121,7 +137,8 @@ java -jar target/pbft-1.0-SNAPSHOT.jar
 
 | 说明                                                         |
 | ------------------------------------------------------------ |
-| 无 View Change：主节点宕机或超时后无法切换新主节点，待后续实现 |
+| View Change 为教学简化版：省略了 checkpoint/prepare-set 同步与消息重放，真实场景需补充完整状态恢复 |
+| View Change 仅由超时触发：主节点作恶（发送不一致消息）时，副本节点不会主动发起 View Change，而是依赖三阶段共识的安全校验拒绝分叉；真实 PBFT 允许副本收集证据后主动切换 |
 | 无消息签名：senderId 为节点自报，未做密码学验证，真实场景需结合数字签名 |
 | 单进程模拟：节点为同进程的不同线程，不涉及真实网络通信       |
 
@@ -193,6 +210,15 @@ Any two conflicting decisions each require 2f+1 votes. Their union exceeds 3f+1 
 [case2-跑路]    未能达成共识，仅 0 个节点提交，未达到阈值 3
 ```
 
+**case3 — Primary crash & View Change**: No PRE_PREPARE is sent. Replicas time out after 5s, broadcast VIEW_CHANGE, elect a new primary, and resume consensus in the new view.
+
+```
+case3 向当前主节点1发送请求，view=1
+[case3] 共识达成，4 个节点完成本地提交
+[case3-after-viewchange] 节点0 viewNumber=1 primary=false
+[case3-after-viewchange] 节点1 viewNumber=1 primary=true
+```
+
 ------
 
 ### Getting Started
@@ -212,7 +238,8 @@ java -jar target/pbft-1.0-SNAPSHOT.jar
 
 | Issue                     | Note                                                         |
 | ------------------------- | ------------------------------------------------------------ |
-| No View Change            | Primary failure handling not yet implemented                 |
+| Simplified View Change    | Checkpoint/prepare-set sync and message replay omitted for teaching clarity |
+| View Change via timeout only | Replicas do not proactively initiate View Change on detecting a malicious primary; they rely on the three-phase safety check to reject conflicting proposals. Real PBFT allows proactive view change with collected proof |
 | No message signatures     | senderId is self-reported; real deployment needs digital signatures |
 | Single-process simulation | Nodes are threads, not real network peers                    |
 
