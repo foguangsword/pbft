@@ -4,7 +4,7 @@ import lombok.Data;
 
 @Data
 public class Message {
-    public enum Type {PRE_PREPARE, PREPARE, COMMIT};
+    public enum Type {PRE_PREPARE, PREPARE, COMMIT, VIEW_CHANGE, NEW_VIEW};
     Type type; //消息类型
     int viewNumber; //任期，主节点不换任期不变
     int seqNumber; //消息在某任期下的序列号
