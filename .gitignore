@@ -79,3 +79,6 @@ application-local.yml
 .git/
 
 todo.md
+ITERATION_LOG.md
+
+dependency-reduced-pom.xml

@@ -6,7 +6,7 @@ import java.util.List;
 /**
  * 模拟节点中保存的网络上下文
  * */
-public class NetwokContext {
+public class NetworkContext {
     public static List<Node> allNodes = new ArrayList<>();
 
     public static void broadcast(Message msg){

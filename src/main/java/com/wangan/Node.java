@@ -21,7 +21,7 @@ public class Node implements Runnable{
     public boolean primary;
     BlockingQueue<Message> messagesQueue = new LinkedBlockingQueue<>();
     ConcurrentHashMap<String, Set<Integer>> msgCountMap = new ConcurrentHashMap<>(); //message key - set
-    ConcurrentHashMap<String, Boolean> msgBroadMap = new ConcurrentHashMap<>(); //message key - bool
+    ConcurrentHashMap<String, Boolean> msgActionMap = new ConcurrentHashMap<>(); //message key - bool
     Set<String> committedKeys = ConcurrentHashMap.newKeySet();
 
     public Node (int id, boolean primary){
@@ -29,10 +29,13 @@ public class Node implements Runnable{
         this.primary = primary;
     }
 
-    //接收消息
+    // 获取指定 view 的主节点 ID
+    static int getPrimaryId(int viewNumber) {
+        return Math.abs(viewNumber) % Constant.TOTAL;
+    }
+
+    //接收消息，仅入队，计票放到 handle 阶段以保证日志顺序与逻辑一致
     void receive(Message message) {
-        msgCountMap.computeIfAbsent(message.key(), k -> new ConcurrentSkipListSet<>()).add(message.senderId);
-        msgBroadMap.putIfAbsent(message.key(), false);
         messagesQueue.add(message);
     }
 
@@ -52,36 +55,60 @@ public class Node implements Runnable{
         return false;
     }
 
-    // 节点收PRE_PREPARE消息，到网络中广播 prepare消息
+    // 节点收PRE_PREPARE消息，验证主节点身份后到网络中广播 prepare消息
     void handlePrePrepare(Message msg) {
+        if (msg.senderId != getPrimaryId(msg.viewNumber)) {
+            log.warn("节点{}拒绝非法PRE_PREPARE: view={} 的主节点应为{}, 实际sender={}",
+                    this.id, msg.viewNumber, getPrimaryId(msg.viewNumber), msg.senderId);
+            return;
+        }
+
         log.info(this.id + "节点收到PRE-PREPARE消息" + JSON.toJSONString(msg));
         Message prepareMsg = new Message(Message.Type.PREPARE, msg.viewNumber, msg.seqNumber, msg.digest, this.id);
-        NetwokContext.broadcast(prepareMsg);
-        msgCountMap.computeIfAbsent(prepareMsg.key(), k -> new ConcurrentSkipListSet<>()).add(this.id); //自己记prepare消息
-        msgBroadMap.put(msg.key(), true); //PRE-PREPARE消息已做了广播处理，广播为PREPARE消息。PRE-PREPARE默认为真
+        NetworkContext.broadcast(prepareMsg);
+        msgCountMap.computeIfAbsent(prepareMsg.key(), k -> new ConcurrentSkipListSet<>()).add(this.id);
+        msgActionMap.putIfAbsent(prepareMsg.key(), false);
+        msgActionMap.put(msg.key(), true);
     }
 
-    // 节点收到prepare消息，判断一致的消息数量是否达到2n+1，是则广播commit消息
+    // 节点收到prepare消息，判断一致的消息数量是否达到2f+1，是则广播commit消息
     void handlePrepare(Message msg) {
         log.info(this.id + "节点收到PREPARE消息" + JSON.toJSONString(msg));
         String key = msg.key();
-        if(isMessageTrue(msg) && !msgBroadMap.get(key)){ //没广播过
+
+        // 计票：在处理阶段计数，保证日志与逻辑顺序一致
+        msgCountMap.computeIfAbsent(key, k -> new ConcurrentSkipListSet<>()).add(msg.senderId);
+        msgActionMap.putIfAbsent(key, false);
+
+        if (isMessageTrue(msg) && Boolean.FALSE.equals(msgActionMap.get(key))) {
             log.info(this.id + "节点收到PREPARE消息" + JSON.toJSONString(msg) + "后，已收到满足数量的一致消息，广播COMMIT消息");
             Message commitMsg = new Message(Message.Type.COMMIT, msg.viewNumber, msg.seqNumber, msg.digest, this.id);
-            NetwokContext.broadcast(commitMsg);
-            msgCountMap.computeIfAbsent(commitMsg.key(), k -> new ConcurrentSkipListSet<>()).add(this.id); //自己记commit消息
-            msgBroadMap.put(key, true);
+            NetworkContext.broadcast(commitMsg);
+            msgCountMap.computeIfAbsent(commitMsg.key(), k -> new ConcurrentSkipListSet<>()).add(this.id);
+            msgActionMap.putIfAbsent(commitMsg.key(), false);
+            msgActionMap.put(key, true);
         }
     }
 
-    //节点收到commit消息，判断一致的消息数量是否达到2n+1，是则最终提交
+    //节点收到commit消息，判断一致的消息数量是否达到2f+1，是则最终提交
     void handleCommit(Message msg){
         log.info(this.id + "节点收到COMMIT消息" + JSON.toJSONString(msg));
         String key = msg.key();
-        if(isMessageTrue(msg) && !msgBroadMap.get(key)) {
+
+        // 计票：在处理阶段计数，保证日志与逻辑顺序一致
+        msgCountMap.computeIfAbsent(key, k -> new ConcurrentSkipListSet<>()).add(msg.senderId);
+        msgActionMap.putIfAbsent(key, false);
+
+        // 安全校验：只提交自己已经参与过 COMMIT 的提案
+        Set<Integer> commitSenders = msgCountMap.get(key);
+        if (commitSenders == null || !commitSenders.contains(this.id)) {
+            return;
+        }
+
+        if (isMessageTrue(msg) && Boolean.FALSE.equals(msgActionMap.get(key))) {
             log.info(this.id + "节点收到COMMIT消息" + JSON.toJSONString(msg) + "后，已收到满足数量的一致消息，进行本地提交执行");
             committedKeys.add(key); //记录已提交
-            msgBroadMap.put(key, true);
+            msgActionMap.put(key, true);
         }
     }
 

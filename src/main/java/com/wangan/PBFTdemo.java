@@ -10,10 +10,9 @@ public class PBFTdemo {
     public static void main(String[] args) throws Exception{
         // 模拟 4 个节点，其中 Node0 是主节点
         for(int i = 0; i < Constant.TOTAL; i++){
-            boolean primary = false;
-            if(i == 0) primary = true;
+            boolean primary = (i == Node.getPrimaryId(0));
             Node node = new Node(i, primary);
-            NetwokContext.allNodes.add(node);
+            NetworkContext.allNodes.add(node);
             Thread thread = new Thread(node);
             thread.setDaemon(true);
             thread.start();
@@ -32,7 +31,7 @@ public class PBFTdemo {
 
     private static void printResult(String caseName, String digest, int viewNumber, int seqNumber) {
         String commitKey = String.format("%s|%d|%d|%s", Message.Type.COMMIT, viewNumber, seqNumber, digest);
-        long committedCount = NetwokContext.allNodes.stream()
+        long committedCount = NetworkContext.allNodes.stream()
                 .filter(node -> node.committedKeys.contains(commitKey))
                 .count();
         if (committedCount >= Constant.QUORUM) {
@@ -44,18 +43,17 @@ public class PBFTdemo {
 
     private static void case1(){
         String digest = "提刀上洛"; // 简化
-        int senderId = 0; //主节点0
+        int senderId = Node.getPrimaryId(0); // view=0 的主节点
         Message prePrepare = new Message(Message.Type.PRE_PREPARE, 0, 1, digest, senderId);
-        for (Node node : NetwokContext.allNodes) {
-            if(node.id != senderId)
-                node.receive(prePrepare);
+        for (Node node : NetworkContext.allNodes) {
+            node.receive(prePrepare);
         }
     }
 
     private static void case2(){
-        int senderId = 0; //模拟主节点0在PRE_PREPARE阶段作恶
-        NetwokContext.allNodes.get(1).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "提刀上洛", senderId));
-        NetwokContext.allNodes.get(2).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "跑路", senderId));
-        NetwokContext.allNodes.get(3).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "跑路", senderId));
+        int senderId = Node.getPrimaryId(0); //模拟主节点0在PRE_PREPARE阶段作恶
+        NetworkContext.allNodes.get(1).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "提刀上洛", senderId));
+        NetworkContext.allNodes.get(2).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "跑路", senderId));
+        NetworkContext.allNodes.get(3).receive(new Message(Message.Type.PRE_PREPARE, 0, 2, "跑路", senderId));
     }
 }
